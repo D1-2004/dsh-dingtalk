@@ -1,0 +1,30 @@
+# dsh-im-dingtalk bundle patch
+#
+# 当本包通过 `dsh plugin --profile <name> add @d1-2004/dsh-dingtalk` 安装后，
+# dsh 启动时自动加载此 patch。
+#
+# 环境变量：
+#   DINGTALK_CLIENT_ID     - 钉钉应用 Client ID / AppKey（必填）
+#   DINGTALK_CLIENT_SECRET - 钉钉应用 Client Secret / AppSecret（必填）
+#   DINGTALK_ROBOT_CODE    - 机器人编码（可选，缺省回落到 Client ID）
+#
+# 叠加顺序：dsh-base → 本 bundle patch → profile cordis.patch.yml → --patch
+
+# ── 插入 im-dingtalk 插件行 ──
+- insert:
+    - id: im-dingtalk
+      name: '@d1-2004/dsh-dingtalk'
+      config:
+        clientId: __FROM_ENV__
+        clientSecret: __FROM_ENV__
+        # provider/model 留空：从宿主默认模型路由继承
+        # 用户可通过 /bot-model 命令在聊天中切换
+        markdownTitle: AI 助手
+        textChunkLimit: 4000
+        sessionIdleTimeout: 1800000
+        access:
+          directMode: open
+          directAllow: []
+          groupMode: open
+          groupAllow: []
+        debug: false
