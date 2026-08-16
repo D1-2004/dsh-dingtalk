@@ -5,8 +5,9 @@
 - **Stream 模式接入** — 开放平台 WebSocket 长连接，无需公网回调地址，断线自动重连
 - **双通道回复** — 首选 sessionWebhook 免权限回复，过期自动兜底机器人主动发送 OpenAPI
 - **会话隔离与恢复** — 每个单聊用户 / 群聊一个独立 agent，SessionId 确定性派生，重启可恢复上下文
+- **串行与合并** — 同会话严格串行；处理期间连发的消息合并为一个最新请求，不打断当前轮
 - **凭据引导** — 本机有 dws CLI 时可「扫码即用」：授权 → 取凭证 / 建号 → 自动写入 profile
-- **全消息类型入站** — 文本 / 富文本 / 语音（识别文本）/ 图片 / 视频 / 文件归一化为 agent 可读内容
+- **全消息类型入站** — 文本 / 富文本 / 语音（识别文本）/ 图片 / 视频 / 文件归一化为 agent 可读内容，未知类型不丢弃
 
 ## 快速开始
 
@@ -99,11 +100,12 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-dingtalk/cordis.patch.yml
 
 | 入站 msgtype | 处理方式 |
 |--------------|----------|
-| `text` | 原文透传 |
+| `text` | 原文透传；正文为空时尝试 `content.markdown/text/title/recognition` 等字段形状 |
 | `richText` | 文本片段拼接，图片以数量占位说明 |
 | `audio` | 使用语音识别文本（带时长标注） |
 | `picture` / `video` | 占位说明（暂不下载） |
 | `file` | 文件名占位说明（暂不下载） |
+| 其它 / 未来新增 | 不丢弃：脱敏后的原始消息 JSON 交给模型自行理解（sessionWebhook 等敏感字段已剥离） |
 
 出站统一为 markdown（`msgtype: markdown` / `msgKey: sampleMarkdown`），超长按
 代码块 / GFM 表格边界感知切分，避免语法块被拦腰截断。
@@ -167,6 +169,20 @@ sessionKey: `dingtalk:${clientId}:${scope}:${peerId}`，由 SHA-256 确定性派
 - **消息 ack**：Stream 服务端对 60s 未响应的消息会重推，插件收到即 ack、异步处理，并有 msgId 去重兜底。
 - **流式输出**：钉钉 IM 消息没有「编辑已发送消息」通道，回复为缓冲聚合后整体发送（AI 卡片流式见 Roadmap）。
 
+### 工程化处理
+
+以下处理参考了钉钉 Workspace CLI（dws）`dev connect` 机器人的开源实现
+（[DingTalk-Real-AI/dingtalk-workspace-cli](https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli)）中踩过的坑：
+
+- **同会话串行 + 突发合并**：agent 处理期间同会话的新消息不立即投递（避免中途 steering
+  污染当前轮），turn 结束后整批合并为「用户连续发送了以下消息」一个请求；斜杠命令不参与合并。
+- **发送重试**：sessionWebhook / OpenAPI 的瞬时错误（EOF、timeout、5xx、429）按 1s/2s/4s
+  指数退避重试，一次网络抖动不等于整轮丢答案；权限类错误不重试。
+- **单实例锁**：钉钉对同 clientId 的多条 Stream 连接做负载均衡分流，双实例并存会表现为
+  「机器人时灵时不灵」。插件用 pid 锁文件保证同机单实例，陈旧锁自动接管。
+- **未知消息类型不丢弃**：不按 msgtype 白名单过滤，正文多级 fallback 后仍不识别的消息，
+  把脱敏后的原始 JSON 交给模型解释——钉钉新增消息类型无需插件发版。
+
 ## 设计原则
 
 - **纯 Cordis 插件** — 遵循 dsh "Plugins, not loop changes" 原则
@@ -174,6 +190,14 @@ sessionKey: `dingtalk:${clientId}:${scope}:${peerId}`，由 SHA-256 确定性派
 - **会话隔离** — 每个钉钉单聊用户 / 群聊各一个独立 Agent
 - **Preset 支持** — 可通过 `agent-presets` 服务挂载预设（工具集、prompt 等）
 - **闲置回收** — 超时自动 dispose Agent，防止内存泄漏
+
+## Roadmap
+
+- **AI 卡片流式回复**：卡片「思考中 → 完成」状态机（create → deliver → 流式帧 → finalize），
+  失败自动降级普通消息；帧节流与 repair 帧等细节在 dws 实现里已有成熟参考。
+- **附件下载落地**：downloadCode 换临时链接下载到 agent 工作目录，让 agent 真正读取
+  图片 / 文件内容（含大小上限与超限清理）。
+- **健康档案**：心跳文件记录 lastPush / lastReply / lastError，供外部判活与故障定位。
 
 ## 本地开发
 

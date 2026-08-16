@@ -20,6 +20,15 @@ const WEBHOOK_EXPIRY_MARGIN_MS = 15_000;
 
 const HTTP_TIMEOUT_MS = 15_000;
 
+/** 瞬时错误的重试退避序列：一次网络抖动不应等于整轮丢答案 */
+const SEND_RETRY_DELAYS_MS = [1_000, 2_000, 4_000];
+
+/** 是否为值得重试的瞬时错误（网络抖动 / 超时 / 服务端 5xx / 限流） */
+function isTransientSendError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /HTTP 5\d\d|HTTP 429|timeout|timed? ?out|aborted|fetch failed|network|ECONNRESET|ECONNREFUSED|EPIPE|EOF|socket hang up/i.test(message);
+}
+
 /** sendMarkdown 的目标上下文（SessionRecord 子集） */
 interface SendContext {
   replyTarget: ReplyTarget;
@@ -36,6 +45,26 @@ export class DingTalkMarkdownSender implements DingTalkSender {
   ) {}
 
   async sendMarkdown(record: SendContext, content: string): Promise<void> {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= SEND_RETRY_DELAYS_MS.length; attempt++) {
+      if (attempt > 0) {
+        const delay = SEND_RETRY_DELAYS_MS[attempt - 1]!;
+        await new Promise((r) => setTimeout(r, delay));
+        this.logger.info(`im-dingtalk: retrying send (attempt ${attempt + 1}/${SEND_RETRY_DELAYS_MS.length + 1})`);
+      }
+      try {
+        await this.sendOnce(record, content);
+        return;
+      } catch (err) {
+        lastErr = err;
+        if (!isTransientSendError(err)) break;
+      }
+    }
+    throw lastErr;
+  }
+
+  /** 单次发送：webhook 可用先走 webhook，失败落到主动发送 */
+  private async sendOnce(record: SendContext, content: string): Promise<void> {
     const target = record.replyTarget;
 
     if (this.webhookUsable(target)) {

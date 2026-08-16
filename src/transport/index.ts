@@ -6,3 +6,4 @@ export { createOutboundHandler } from './outbound.js';
 export type { OutboundHandler, SessionLike, DingTalkSender, ToolsRegistryLike } from './outbound.js';
 export { chunkMarkdownText } from './chunker.js';
 export { OutboundBuffer } from './outbound-buffer.js';
+export { TurnQueue, mergePending } from './turn-queue.js';

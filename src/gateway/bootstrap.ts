@@ -8,6 +8,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import { DWClient, TOPIC_ROBOT, type DWClientDownStream } from 'dingtalk-stream';
 import { SessionManager, type DshAgentRegistry } from '../session/index.js';
 import { handleInbound, createOutboundHandler } from '../transport/index.js';
+import { TurnQueue } from '../transport/turn-queue.js';
 import type { ToolsRegistryLike } from '../transport/tool-presenter.js';
 import { AccessTokenProvider } from '../dingtalk/token.js';
 import { DingTalkMarkdownSender } from '../dingtalk/sender.js';
@@ -16,6 +17,7 @@ import { buildUserAgent } from '../shared/index.js';
 import type { ImDingTalkConfig } from '../config.js';
 import type { Logger } from '../types.js';
 import { InboundPipeline } from './pipeline.js';
+import { InstanceLock } from './instance-lock.js';
 
 export async function bootstrapGateway(
   ctx: Context,
@@ -23,7 +25,16 @@ export async function bootstrapGateway(
   config: ImDingTalkConfig,
   logger: Logger,
 ): Promise<void> {
+  // ── 单实例锁：同 clientId 多实例会被钉钉负载均衡分流消息 ──
+  const lock = new InstanceLock(config.clientId);
+  if (!lock.acquire(logger)) {
+    logger.error('im-dingtalk: 已有同 clientId 实例在运行（多实例会导致消息被随机分流），本实例不启动');
+    return;
+  }
+
   const manager = new SessionManager(ctx, agents, config, logger);
+  const turnQueue = new TurnQueue(manager, logger);
+  manager.onSessionRemoved = (key) => turnQueue.clear(key);
 
   // ── 钉钉接入组件 ──
   const tokens = new AccessTokenProvider(config.clientId, config.clientSecret, logger);
@@ -61,7 +72,7 @@ export async function bootstrapGateway(
     try {
       const proceed = await pipeline.process(msg);
       if (proceed) {
-        await handleInbound(msg, manager, logger);
+        await handleInbound(msg, manager, turnQueue, logger);
       }
     } catch (err) {
       logger.error(`im-dingtalk: inbound handling failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -78,8 +89,15 @@ export async function bootstrapGateway(
   }
 
   const outboundHandler = createOutboundHandler(manager, sender, config, logger, toolsRegistry);
-  (ctx as unknown as { on(event: string, handler: (...args: unknown[]) => void): void })
-    .on('session/event', outboundHandler as (...args: unknown[]) => void);
+  const ctxEvents = ctx as unknown as { on(event: string, handler: (...args: unknown[]) => void): void };
+  ctxEvents.on('session/event', outboundHandler as (...args: unknown[]) => void);
+
+  // turn/end → 释放 TurnQueue 的 busy 态并投递合并后的 pending
+  ctxEvents.on('session/event', ((session: { header: { id: string } }, event: { type?: string }) => {
+    if (event?.type === 'turn/end') {
+      turnQueue.onTurnEnd(session.header.id);
+    }
+  }) as unknown as (...args: unknown[]) => void);
 
   // ── 生命周期 ──
   (ctx as unknown as { effect(fn: () => (() => Promise<void>) | void, name?: string): void })
@@ -96,6 +114,7 @@ export async function bootstrapGateway(
         logger.info('Shutting down');
         await manager.disposeAll();
         client.disconnect();
+        lock.release();
       };
     }, 'im-dingtalk.lifecycle');
 }

@@ -38,6 +38,9 @@ export class SessionManager {
   private readonly evictor: IdleEvictor;
   private readonly modelResolver: ModelResolver;
 
+  /** 会话移除回调（remove/evict/disposeAll 时触发，供外部清理关联状态） */
+  onSessionRemoved?: (sessionKey: string) => void;
+
   constructor(
     private readonly ctx: Context,
     private readonly agents: DshAgentRegistry,
@@ -54,6 +57,7 @@ export class SessionManager {
         this.sessions.delete(key);
         record.agent.cancel({ kind: 'user' });
         void record.handle.dispose().catch(() => {});
+        this.onSessionRemoved?.(key);
       },
     );
   }
@@ -365,6 +369,7 @@ export class SessionManager {
     this.modelResolver.clearSessionId(key);
     record.agent.cancel({ kind: 'user' });
     await record.handle.dispose().catch(() => {});
+    this.onSessionRemoved?.(key);
     this.logger.info(`session removed: key=${key}`);
   }
 
@@ -374,6 +379,7 @@ export class SessionManager {
     this.sessions.clear();
     for (const record of records) {
       record.agent.cancel({ kind: 'user' });
+      this.onSessionRemoved?.(record.sessionKey);
     }
     await Promise.allSettled(records.map((r) => r.handle.dispose()));
     this.logger.info(`all sessions disposed (count=${records.length})`);
